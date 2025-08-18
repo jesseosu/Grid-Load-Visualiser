@@ -5,14 +5,16 @@ import streamlit as st
 import requests
 from datetime import datetime, timedelta
 from sklearn.linear_model import LinearRegression
+from sklearn.ensemble import RandomForestRegressor
 
-# ----------------------------
-# Simulate load data per zone
-# ----------------------------
+
+# Load Simulation Function
+
 def simulate_load_data(start_time, hours, base_load, temp, zone_name):
     timestamps = [start_time + timedelta(hours=i) for i in range(hours)]
     load = []
-    for hour in range(hours):
+    for i in range(hours):
+        hour = timestamps[i].hour
         if 6 <= hour <= 9:
             fluctuation = np.random.normal(0, 15)
             current_load = base_load + 100 + fluctuation
@@ -25,105 +27,128 @@ def simulate_load_data(start_time, hours, base_load, temp, zone_name):
         else:
             fluctuation = np.random.normal(0, 10)
             current_load = base_load + fluctuation
-
         load.append(max(current_load, 0))
 
     return pd.DataFrame({
         "Time": timestamps,
         "Zone": zone_name,
-        "Load (MW)": load
+        "Load (MW)": load,
+        "Temp (°C)": temp
     })
 
-# ----------------------------
-# Weather API Integration
-# ----------------------------
+
+# Weather API
+
 def fetch_temperature(city):
     try:
-        api_key = "your_openweathermap_api_key"  # Replace with your real API key
+        api_key = "your_openweathermap_api_key"
         url = f"http://api.openweathermap.org/data/2.5/weather?q={city}&appid={api_key}&units=metric"
         response = requests.get(url)
-        data = response.json()
-        return data['main']['temp']
+        return response.json()['main']['temp']
     except:
-        return 30  # fallback temperature
+        return 30
 
-# ----------------------------
-# Streamlit UI
-# ----------------------------
-st.set_page_config(page_title="Grid Load Visualiser", layout="wide")
-st.title("⚡ Grid Load Visualiser & Forecaster")
 
-st.sidebar.header("Simulation Settings")
-cities = ["Brisbane", "Gold Coast", "Cairns", "Toowoomba"]
-selected_city = st.sidebar.selectbox("Select City (for Weather)", cities)
-temperature = fetch_temperature(selected_city)
-st.sidebar.write(f"Current temperature: {temperature:.1f} °C")
+# Forecasting Function
 
-zones = st.sidebar.multiselect("Zones to Simulate", ["North Brisbane", "South Brisbane", "Gold Coast", "Cairns"], default=["North Brisbane", "Gold Coast"])
-base_load = st.sidebar.slider("Base Load (MW)", 200, 500, 400)
-hours = st.sidebar.slider("Simulation Duration (hours)", 12, 48, 24)
-thresh = st.sidebar.slider("Overload Threshold (MW)", 800, 1500, 950)
+def forecast_load(df_zone, model_type="Linear"):
+    df_zone = df_zone.copy()
+    df_zone['Hour'] = range(len(df_zone))
+    X = df_zone[['Hour']]
+    y = df_zone['Load (MW)']
 
-# ----------------------------
-# Generate Data
-# ----------------------------
+    if model_type == "Linear":
+        model = LinearRegression()
+    else:
+        model = RandomForestRegressor(n_estimators=100, random_state=42)
+
+    model.fit(X, y)
+
+    X_future = pd.DataFrame({"Hour": range(len(df_zone), len(df_zone)+12)})
+    y_future = model.predict(X_future)
+    future_times = [df_zone['Time'].max() + timedelta(hours=i+1) for i in range(12)]
+
+    return pd.DataFrame({
+        "Time": future_times,
+        "Zone": df_zone['Zone'].iloc[0],
+        "Load (MW)": y_future
+    })
+
+
+# Streamlit App Layout
+
+st.set_page_config("Powerlink Grid Load Simulator", layout="wide")
+st.title("⚡ Grid Load Simulator & Forecaster for Powerlink")
+
+# --- Sidebar Settings ---
+st.sidebar.header("Simulation Controls")
+city = st.sidebar.selectbox("Weather City", ["Brisbane", "Gold Coast", "Cairns"])
+temperature = fetch_temperature(city)
+st.sidebar.markdown(f"**Current Temp:** {temperature:.1f} °C")
+
+zones = st.sidebar.multiselect("Zones", ["North Brisbane", "South Brisbane", "Gold Coast", "Cairns"], default=["North Brisbane"])
+base_load = st.sidebar.slider("Base Load (MW)", 200, 500, 350)
+hours = st.sidebar.slider("Simulation Hours", 12, 72, 24)
+threshold = st.sidebar.slider("Overload Threshold (MW)", 800, 1500, 950)
+model_choice = st.sidebar.selectbox("Forecasting Model", ["Linear", "Random Forest"])
+
+
+# Simulate and Display Load
+
 start_time = datetime.now()
 df_all = pd.concat([simulate_load_data(start_time, hours, base_load, temperature, zone) for zone in zones])
 
-# ----------------------------
-# Plot Load Curves
-# ----------------------------
-st.subheader("Simulated Load Over Time")
-fig = px.line(df_all, x="Time", y="Load (MW)", color="Zone", markers=True, line_shape="spline")
-fig.update_layout(xaxis_title="Time", yaxis_title="Load (MW)", title_x=0.5)
+st.subheader("Load Over Time")
+fig = px.line(df_all, x="Time", y="Load (MW)", color="Zone", markers=False)
+fig.add_hline(y=threshold, line_dash="dash", line_color="red", annotation_text="Overload Threshold")
 st.plotly_chart(fig, use_container_width=True)
 
-# ----------------------------
-# Forecasting (Regression)
-# ----------------------------
-st.subheader("Simple Forecasting (Linear Regression)")
-zone_to_forecast = st.selectbox("Zone to Forecast", zones)
-df_zone = df_all[df_all['Zone'] == zone_to_forecast]
-df_zone['Hour'] = range(len(df_zone))
-X = df_zone[['Hour']]
-y = df_zone['Load (MW)']
-model = LinearRegression().fit(X, y)
-X_future = pd.DataFrame({"Hour": range(len(df_zone), len(df_zone)+12)})
-y_future = model.predict(X_future)
-future_times = [df_zone['Time'].max() + timedelta(hours=i+1) for i in range(12)]
 
-df_forecast = pd.DataFrame({
-    "Time": future_times,
-    "Zone": zone_to_forecast,
-    "Load (MW)": y_future
-})
+# Forecasting
 
-fig2 = px.line(pd.concat([df_zone[['Time', 'Load (MW)']], df_forecast]), x="Time", y="Load (MW)", title=f"Forecast for {zone_to_forecast}")
+st.subheader("Load Forecasting")
+forecast_zone = st.selectbox("Select Zone for Forecast", zones)
+df_zone = df_all[df_all["Zone"] == forecast_zone]
+df_forecast = forecast_load(df_zone, model_type=model_choice)
+
+fig2 = px.line(pd.concat([df_zone[['Time', 'Load (MW)']], df_forecast]), x="Time", y="Load (MW)", color_discrete_sequence=["blue"])
 fig2.update_traces(line=dict(dash="dot"), selector=dict(mode="lines"))
-fig2.update_layout(xaxis_title="Time", yaxis_title="Load (MW)", title_x=0.5)
+fig2.add_hline(y=threshold, line_dash="dash", line_color="red", annotation_text="Overload Threshold")
+fig2.update_layout(title=f"Forecast for {forecast_zone} ({model_choice})")
 st.plotly_chart(fig2, use_container_width=True)
 
-# ----------------------------
-# Overload Alerts
-# ----------------------------
-if df_all['Load (MW)'].max() > thresh:
-    st.error(f"Peak load exceeded threshold ({thresh} MW)! Max observed: {df_all['Load (MW)'].max():.2f} MW")
 
-# ----------------------------
-# Download CSV Option
-# ----------------------------
-st.download_button("Download Simulation Data as CSV", df_all.to_csv(index=False).encode(), file_name="grid_load_simulation.csv")
+# Peak Load Summary
 
-# ----------------------------
-# Info
-# ----------------------------
+st.subheader("Peak Load Summary")
+summary = df_all.groupby("Zone").agg(Max_Load_MW=("Load (MW)", "max"))
+st.dataframe(summary.style.highlight_max(axis=0))
+
+
+# Weather vs Load Plot
+
+st.subheader("Weather vs Load Correlation")
+scatter = px.scatter(df_all, x="Temp (°C)", y="Load (MW)", color="Zone", trendline="ols")
+st.plotly_chart(scatter, use_container_width=True)
+
+
+# Download Button
+
+st.download_button("Export CSV", df_all.to_csv(index=False).encode(), file_name="powerlink_load_simulation.csv")
+
+
+# Info Footer
+
 st.markdown("""
 ---
-### Notes
-- Load is based on simulated values per region adjusted by time of day and temperature
-- Forecast uses simple linear regression for demo purposes
-- Weather data via [OpenWeatherMap](https://openweathermap.org)
-- Supports multi-zone input and downloadable reporting
+### Project Summary
+This interactive simulation helps model and forecast electrical grid load across Queensland zones under varying temperature conditions.
 
-Tip: Try setting temperature above 40°C and observe the impact.
+- Demonstrates correlation between heat and load
+- Alerts for overload risks
+- Implements forecasting models
+- Simulates real-time grid load dynamics
+- Showcases user interface development with Streamlit and Plotly
+
+Built as a showcase for Powerlink’s **Energy Insights & Digital Systems Internship**.
 """)
